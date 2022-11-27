@@ -16,7 +16,7 @@
         naersk-lib = naersk.lib."${system}";
       in rec
       {
-        packages.nixeditor = naersk-lib.buildPackage {
+        packages.nix-data-generator = naersk-lib.buildPackage {
           pname = "nix-data-generator";
           root = ./.;
           nativeBuildInputs = with pkgs; [ makeWrapper ];
@@ -30,7 +30,7 @@
           '';
         };
 
-        defaultPackage = self.packages.${system}.nixeditor;
+        defaultPackage = self.packages.${system}.nix-data-generator;
 
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [

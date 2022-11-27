@@ -106,10 +106,10 @@ async fn main() {
 }
 
 async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
-    let verurl = format!("https://channels.nixos.org/nixos-{}", version);
-    debug!("Checking NixOS version");
+    let verurl = format!("https://channels.nixos.org/{}", version);
+    debug!("Checking nixpkgs version");
     let resp = reqwest::blocking::get(&verurl)?;
-    let latestnixosver = if resp.status().is_success() {
+    let latestnixpkgsver = if resp.status().is_success() {
         resp.url()
             .path_segments()
             .context("No path segments found")?
@@ -127,15 +127,17 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
                 .context("Last element not found")?
                 .to_string()
         } else {
-            return Err(anyhow!("Could not find latest NixOS version"));
+            return Err(anyhow!("Could not find latest nixpkgs version"));
         }
     };
-    debug!("Latest NixOS version: {}", latestnixosver);
+    debug!("Latest nixpkgs version: {}", latestnixpkgsver);
 
-    let latestnixosver = latestnixosver
+    let latestpkgsver = latestnixpkgsver
         .strip_prefix("nixos-")
-        .unwrap_or(&latestnixosver);
-    info!("latestnixosver: {}", latestnixosver);
+        .unwrap_or(&latestnixpkgsver);
+    let latestpkgsver = latestpkgsver.strip_prefix("nixpkgs-")
+        .unwrap_or(&latestpkgsver);
+    info!("latestnixpkgsver: {}", latestpkgsver);
 
     // Check if source directory exists
     let srcdir = Path::new(sourcedir);
@@ -145,16 +147,16 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
     }
 
     // Check if latest version is already downloaded
-    if let Ok(prevver) = fs::read_to_string(&format!("{}/nixospkgs.ver", sourcedir)) {
-        if prevver == latestnixosver && Path::new(&format!("{}/nixospkgs.db", sourcedir)).exists()
+    if let Ok(prevver) = fs::read_to_string(&format!("{}/nixpkgs.ver", sourcedir)) {
+        if prevver == latestpkgsver && Path::new(&format!("{}/nixpkgs.db", sourcedir)).exists()
         {
-            debug!("No new version of NixOS found");
+            debug!("No new version of nixpkgs found");
             return Ok(());
         }
     }
 
     let url = format!(
-        "https://channels.nixos.org/nixos-{}/packages.json.br",
+        "https://channels.nixos.org/{}/packages.json.br",
         version
     );
 
@@ -165,10 +167,10 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
     if resp.status().is_success() {
         // resp is pkgsjson
         debug!("Successfully downloaded packages.json.br");
-        let db = format!("sqlite://{}/nixospkgs.db", sourcedir);
+        let db = format!("sqlite://{}/nixpkgs.db", sourcedir);
 
-        if Path::new(&format!("{}/nixospkgs.db", sourcedir)).exists() {
-            fs::remove_file(&format!("{}/nixospkgs.db", sourcedir))?;
+        if Path::new(&format!("{}/nixpkgs.db", sourcedir)).exists() {
+            fs::remove_file(&format!("{}/nixpkgs.db", sourcedir))?;
         }
         debug!("Creating SQLite database");
         Sqlite::create_database(&db).await?;
@@ -248,7 +250,7 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
         debug!("Inserting data into database");
         let mut cmd = Command::new("sqlite3")
             .arg("-csv")
-            .arg(&format!("{}/nixospkgs.db", sourcedir))
+            .arg(&format!("{}/nixpkgs.db", sourcedir))
             .arg(".import '|cat -' pkgs")
             .stdin(Stdio::piped())
             .spawn()?;
@@ -329,22 +331,66 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
         debug!("Inserting metadata into database");
         let mut metacmd = Command::new("sqlite3")
             .arg("-csv")
-            .arg(&format!("{}/nixospkgs.db", sourcedir))
+            .arg(&format!("{}/nixpkgs.db", sourcedir))
             .arg(".import '|cat -' meta")
             .stdin(Stdio::piped())
             .spawn()?;
         let metacmd_stdin = metacmd.stdin.as_mut().unwrap();
         metacmd_stdin.write_all(metadata.as_bytes())?;
         let _status = metacmd.wait()?;
-        debug!("Finished creating database");
+        debug!("Finished creating nixpkgs database");
+        
+        // Create version database
+        let db = format!("sqlite://{}/nixpkgs_versions.db", sourcedir);
+        Sqlite::create_database(&db).await?;
+        let pool = SqlitePool::connect(&db).await?;
+        sqlx::query(
+            r#"
+                CREATE TABLE "pkgs" (
+                    "attribute"	TEXT NOT NULL UNIQUE,
+                    "pname"	TEXT,
+                    "version"	TEXT,
+                    PRIMARY KEY("attribute")
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX "attributes" ON "pkgs" ("attribute")
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE INDEX "pnames" ON "pkgs" ("attribute")
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+    
+        let mut wtr = csv::Writer::from_writer(vec![]);
+        for (pkg, data) in &pkgjson.packages {
+            wtr.serialize((pkg, data.pname.to_string(), data.version.to_string()))?;
+        }
+        let data = String::from_utf8(wtr.into_inner()?)?;
+        let mut cmd = Command::new("sqlite3")
+            .arg("-csv")
+            .arg(&format!("{}/nixpkgs_versions.db", sourcedir))
+            .arg(".import '|cat -' pkgs")
+            .stdin(Stdio::piped())
+            .spawn()?;
+        let cmd_stdin = cmd.stdin.as_mut().unwrap();
+        cmd_stdin.write_all(data.as_bytes())?;
+        let _status = cmd.wait()?;
+
         // Write version downloaded to file
-        File::create(format!("{}/nixospkgs.ver", sourcedir))?
-            .write_all(latestnixosver.as_bytes())?;
+        File::create(format!("{}/nixpkgs.ver", sourcedir))?
+            .write_all(latestpkgsver.as_bytes())?;
     } else {
         return Err(anyhow!("Failed to download latest packages.json"));
     }
-
     Ok(())
-
-
 }

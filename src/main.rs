@@ -136,6 +136,14 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
         .strip_prefix("nixos-")
         .unwrap_or(&latestnixosver);
     info!("latestnixosver: {}", latestnixosver);
+
+    // Check if source directory exists
+    let srcdir = Path::new(sourcedir);
+    if !srcdir.exists() {
+        // create source directory
+        fs::create_dir_all(srcdir)?;
+    }
+
     // Check if latest version is already downloaded
     if let Ok(prevver) = fs::read_to_string(&format!("{}/nixospkgs.ver", sourcedir)) {
         if prevver == latestnixosver && Path::new(&format!("{}/nixospkgs.db", sourcedir)).exists()

@@ -1,9 +1,16 @@
-use std::{fs::{self, File}, path::Path, process::{Command, Stdio}, io::{Write, BufReader}, collections::HashMap, error};
+use std::{
+    collections::HashMap,
+    error,
+    fs::{self, File},
+    io::{BufReader, Write},
+    path::Path,
+    process::{Command, Stdio},
+};
 
+use anyhow::{anyhow, Context, Result};
 use clap::{arg, Parser};
 use log::{debug, error, info};
-use anyhow::{anyhow, Result, Context};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{migrate::MigrateDatabase, Sqlite, SqlitePool};
 
@@ -17,7 +24,6 @@ struct Args {
     #[arg(short, long)]
     src: String,
 }
-
 
 #[derive(Debug, Deserialize)]
 struct NixosPkgList {
@@ -61,6 +67,7 @@ pub enum Platform {
     Single(String),
     List(Vec<String>),
     ListList(Vec<Vec<String>>),
+    Unknown(Value),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -135,7 +142,8 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
     let latestpkgsver = latestnixpkgsver
         .strip_prefix("nixos-")
         .unwrap_or(&latestnixpkgsver);
-    let latestpkgsver = latestpkgsver.strip_prefix("nixpkgs-")
+    let latestpkgsver = latestpkgsver
+        .strip_prefix("nixpkgs-")
         .unwrap_or(&latestpkgsver);
     info!("latestnixpkgsver: {}", latestpkgsver);
 
@@ -148,17 +156,13 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
 
     // Check if latest version is already downloaded
     if let Ok(prevver) = fs::read_to_string(&format!("{}/nixpkgs.ver", sourcedir)) {
-        if prevver == latestpkgsver && Path::new(&format!("{}/nixpkgs.db", sourcedir)).exists()
-        {
+        if prevver == latestpkgsver && Path::new(&format!("{}/nixpkgs.db", sourcedir)).exists() {
             debug!("No new version of nixpkgs found");
             return Ok(());
         }
     }
 
-    let url = format!(
-        "https://channels.nixos.org/{}/packages.json.br",
-        version
-    );
+    let url = format!("https://channels.nixos.org/{}/packages.json.br", version);
 
     // Download file with reqwest blocking
     debug!("Downloading packages.json.br");
@@ -318,13 +322,13 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
                         Ok(x) => Some(x),
                         Err(_) => None,
                     }),
-                data.meta
-                    .platforms
-                    .as_ref()
-                    .and_then(|x| match serde_json::to_string(x) {
+                data.meta.platforms.as_ref().and_then(|x| match x {
+                    Platform::Unknown(_) => None,
+                    _ => match serde_json::to_string(x) {
                         Ok(x) => Some(x),
                         Err(_) => None,
-                    }),
+                    },
+                }),
             ))?;
         }
         let metadata = String::from_utf8(metawtr.into_inner()?)?;
@@ -339,7 +343,7 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
         metacmd_stdin.write_all(metadata.as_bytes())?;
         let _status = metacmd.wait()?;
         debug!("Finished creating nixpkgs database");
-        
+
         // Create version database
         let db = format!("sqlite://{}/nixpkgs_versions.db", sourcedir);
         Sqlite::create_database(&db).await?;
@@ -370,7 +374,7 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
         )
         .execute(&pool)
         .await?;
-    
+
         let mut wtr = csv::Writer::from_writer(vec![]);
         for (pkg, data) in &pkgjson.packages {
             wtr.serialize((pkg, data.pname.to_string(), data.version.to_string()))?;
@@ -387,8 +391,7 @@ async fn downloaddb(mut version: &str, sourcedir: &str) -> Result<()> {
         let _status = cmd.wait()?;
 
         // Write version downloaded to file
-        File::create(format!("{}/nixpkgs.ver", sourcedir))?
-            .write_all(latestpkgsver.as_bytes())?;
+        File::create(format!("{}/nixpkgs.ver", sourcedir))?.write_all(latestpkgsver.as_bytes())?;
     } else {
         return Err(anyhow!("Failed to download latest packages.json"));
     }
